@@ -67,5 +67,98 @@ namespace AuthClient
             public BigInteger expiration { get; set; }
             public Principal[] targets { get; set; }
         }
+
+        public static async Task<AuthClient> Create(
+        AuthClientCreateOptions options = null
+    )
+    {
+        options = options ?? new AuthClientCreateOptions();
+        var storage = options.Storage ?? new IdbStorage();
+
+        SignIdentity key = null;
+        if (options.Identity != null)
+        {
+            key = options.Identity;
+        }
+        else
+        {
+            var maybeIdentityStorage = await storage.Get(KEY_STORAGE_KEY);
+            if (!maybeIdentityStorage && IsBrowser)
+            {
+                // Attempt to migrate from localstorage
+                try
+                {
+                    var fallbackLocalStorage = new LocalStorage();
+                    var localChain = await fallbackLocalStorage.Get(KEY_STORAGE_DELEGATION);
+                    var localKey = await fallbackLocalStorage.Get(KEY_STORAGE_KEY);
+                    if (localChain != null && localKey != null)
+                    {
+                        Console.WriteLine("Discovered an identity stored in localstorage. Migrating to IndexedDB");
+                        await storage.Set(KEY_STORAGE_DELEGATION, localChain);
+                        await storage.Set(KEY_STORAGE_KEY, localKey);
+                        maybeIdentityStorage = localChain;
+                        // clean up
+                        await fallbackLocalStorage.Remove(KEY_STORAGE_DELEGATION);
+                        await fallbackLocalStorage.Remove(KEY_STORAGE_KEY);
+                    }
+                }
+                catch (Exception error)
+                {
+                    Console.Error.WriteLine("error while attempting to recover localstorage: " + error);
+                }
+            }
+
+            if (maybeIdentityStorage != null)
+            {
+                try
+                {
+                    key = Ed25519KeyIdentity.FromJson(maybeIdentityStorage);
+                }
+                catch (Exception e)
+                {
+                    // Ignore this, this means that the localStorage value isn't a valid Ed25519KeyIdentity
+                    // serialization.
+                }
+            }
+        }
+
+        Identity identity = new AnonymousIdentity();
+        DelegationChain chain = null;
+
+        if (key != null)
+        {
+            try
+            {
+                var chainStorage = await storage.Get(KEY_STORAGE_DELEGATION);
+
+                if (options.Identity != null)
+                {
+                    identity = options.Identity;
+                }
+                else if (chainStorage != null)
+                {
+                    chain = DelegationChain.FromJson(chainStorage);
+
+                    // Verify that the delegation isn't expired.
+                    if (!IsDelegationValid(chain))
+                    {
+                        await _deleteStorage(storage);
+                        key = null;
+                    }
+                    else
+                    {
+                        identity = DelegationIdentity.FromDelegation(key, chain);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine(e);
+                // If there was a problem loading the chain, delete the key.
+                await _deleteStorage(storage);
+               
+            }
+
+
     }
 }
